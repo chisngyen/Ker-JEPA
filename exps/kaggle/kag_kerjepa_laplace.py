@@ -29,7 +29,7 @@ from tqdm import tqdm
 torch.set_float32_matmul_precision('high')
 
 # === CONFIG ===
-DATA_PATH = '/kaggle/input/imagenette/imagenette'
+DATA_PATH = '/kaggle/input/datasets/aniladepu/imagenette/imagenette'
 SAVE_DIR = '/kaggle/working/models'
 os.makedirs(SAVE_DIR, exist_ok=True)
 
