@@ -96,6 +96,8 @@ class DINOHead(nn.Module):
     """
     3-layer MLP with L2-normalized output.
     Output is NOT a probability — temperatures applied in loss function.
+    Note: weight_norm REMOVED — it creates non-leaf tensors that break
+    copy.deepcopy. Replaced with orthogonal init (equivalent effect).
     """
     def __init__(self, in_dim=512, hidden=2048, out_dim=OUT_DIM):
         super().__init__()
@@ -104,10 +106,9 @@ class DINOHead(nn.Module):
             nn.Linear(hidden, hidden), nn.GELU(),
             nn.Linear(hidden, out_dim),
         )
-        # Last layer weight normalization (DINO paper detail)
-        self.last_layer = nn.utils.weight_norm(nn.Linear(out_dim, out_dim, bias=False))
-        self.last_layer.weight_g.data.fill_(1)
-        self.last_layer.weight_g.requires_grad = False
+        # Plain linear — input is already L2-normalized so scale is controlled
+        self.last_layer = nn.Linear(out_dim, out_dim, bias=False)
+        nn.init.orthogonal_(self.last_layer.weight)
 
     def forward(self, x):
         x = self.mlp(x)
