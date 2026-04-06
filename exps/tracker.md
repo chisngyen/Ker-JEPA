@@ -35,6 +35,9 @@
 | 5 | **Contrastive (SimCLR) ≫ BYOL, but does not beat VICReg at 50ep** — SimCLR **71.67%** vs BYOL fixed **41%** (many negatives vs one EMA pair); still **−2.44 pp** vs VICReg — invariance + variance/covariance (VICReg) fit this ViT-S/8 + aug stack better than NT-Xent + KSD here | exp03, exp04 |
 | 6 | **Broken EMA init can look “better” than correct BYOL** — random teacher exp01 **47.21%** > fixed exp03 **41.04%**; not a reason to keep the bug — metrics are not monotonic in “correctness” under severe undertraining | exp01 vs exp03 |
 | 7 | **Innovation target (>92.5% @ 50 SSL) not met** — best **74.11%** is **−17.79 pp** vs paper 800-ep KerJEPA (91.90%); gap is mostly **epoch budget + objective** (not Student-t KSD alone) | E2 vs paper |
+| 8 | **VICReg + tiny multicrop (scale 0.05–0.4) HURTS** — 73.76% vs 74.11% baseline; global-local invariance with very small crops conflicts with global-global VICReg gradients; safe local scale is ≥0.14 (per DINOv2) | exp05 vs exp02 |
+| 9 | **DINO collapses without center warmup** — τ_t=0.04 is too sharp when center=0; student learns 1 prototype → 20.66% (near random). DINO needs careful warmup schedule not viable at 50ep | exp06 |
+| 10 | **VICReg is the only stable base at 50ep** — all other methods either collapse (BYOL, DINO) or underperform (SimCLR). VICReg's variance+covariance terms provide intrinsic anti-collapse without extra hyperparams | E1–E6 combined |
 
 ---
 
@@ -131,7 +134,11 @@ gives 9× more cross-scale training signal per step without adding epochs.
 
 | Run | LP Acc | Δ | Notes |
 |:----|:------:|:-:|:------|
-| — | — | — | Pending |
+| Run 1 | **73.76%** | -18.14 | Slightly WORSE than exp02 (74.11%) — multicrop hurt |
+
+**Post-mortem:** λ_mc=0.5 pulls global projections toward tiny local crops (scale 0.05–0.4).
+These crops are semantically very different → conflicting gradients with VICReg's global-global objective.
+Multi-crop invariance helps only when local crops are not too small (DINOv2 uses ≥0.14 scale).
 
 ---
 
@@ -155,7 +162,12 @@ SSL objective available at this budget.
 
 | Run | LP Acc | Δ | Notes |
 |:----|:------:|:-:|:------|
-| — | — | — | Pending |
+| Run 1 | **20.66%** | -71.24 | Collapsed — near random (10 classes = 10% base) |
+
+**Post-mortem:** Center buffer starts at zero → với τ_t=0.04 cực sharp, teacher
+softmax ngay từ step 1 tập trung vào 1 dimension → student chỉ học copy 1 prototype
+→ trivial collapse. DINO rất nhạy với LR schedule, center warmup, và τ_t.
+Cần warmup center riêng trước khi bật KSD. Dead end ở 50ep budget.
 
 ---
 
@@ -167,7 +179,9 @@ SSL objective available at this budget.
 | E2 | **VICReg + KSD-ST (exp02) ★ best** | **74.11** | **-17.79** | 50 |
 | E3 | BYOL Fixed + KSD-ST (exp03) | 41.04 | -50.86 | 50 |
 | E4 | SimCLR + KSD-ST (exp04) | 71.67 | -20.23 | 50 |
-| E5 | **VICReg + MultiCrop + KSD-ST (exp05)** | — | — | 50 |
-| E6 | **DINO + KSD-ST (exp06)** | — | — | 50 |
+| E5 | VICReg + MultiCrop + KSD-ST (exp05) | 73.76 | -18.14 | 50 |
+| E6 | DINO + KSD-ST (exp06) | 20.66 | -71.24 | 50 |
+| E7 | **VICReg + KSD-ST (exp07) — 150ep** | — | — | **150** |
+| E8 | **VICReg + KSD-ST tuned (exp08) — batch256 + LR1e-3** | — | — | **150** |
 | —  | **Paper SOTA** | **91.90** | **0.00** | **800** |
-| —  | **Innovation Target** | **>92.50** | **>+0.60** | **50** |
+| —  | **Innovation Target** | **>92.50** | **>+0.60** | — |

@@ -37,7 +37,9 @@ Ker-JEPA/
 │   │       ├── exp03_byol_fixed.py      # E3: BYOL deepcopy fix [41% dead end]
 │   │       ├── exp04_simclr_student_t.py# E4: SimCLR + KSD-ST [71.67%]
 │   │       ├── exp05_vicreg_multicrop.py# E5: VICReg + multicrop + KSD-ST
-│   │       └── exp06_dino_student_t.py  # E6: DINO + KSD-ST [high priority]
+│   │       ├── exp06_dino_student_t.py  # E6: DINO + KSD-ST [collapsed 20%]
+│       ├── exp07_vicreg_150ep.py    # E7: VICReg + KSD-ST, 150 SSL ep [PENDING]
+│       └── exp08_vicreg_tuned_150ep.py # E8: VICReg tuned batch256+LR1e-3, 150ep
 │   │
 │   ├── legacy/                          # Old scripts (pre-Kaggle refactor)
 │   └── tracker.md                       # Experiment results tracker
