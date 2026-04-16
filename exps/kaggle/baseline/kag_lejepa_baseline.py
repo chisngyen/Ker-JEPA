@@ -29,45 +29,36 @@ from tqdm import tqdm
 torch.set_float32_matmul_precision('high')
 
 # === CONFIG ===
-DATA_PATH = '/kaggle/input/imagenette/imagenette'
+# Note: On Kaggle, ensure dataset path matches correctly. 
+# Typical: /kaggle/input/imagenette/imagenette
+DATA_PATH = '/kaggle/input/datasets/aniladepu/imagenette/imagenette'
 SAVE_DIR = '/kaggle/working/models'
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# === LOSS: LAPLACE KSD (Comparison) ===
-class KSDLoss_Laplace(nn.Module):
-    def __init__(self, sigma=1.0, beta=0.5):
+# === LOSS: GAUSSIAN SIGReg (Standard LeJEPA) ===
+class SIGReg(nn.Module):
+    def __init__(self, knots=17, proj_dim=128):
         super().__init__()
-        self.sigma = sigma
-        self.beta = beta
+        t = torch.linspace(0, 3, knots, dtype=torch.float32)
+        dt = 3 / (knots - 1)
+        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
+        weights[[0, -1]] = dt
+        window = torch.exp(-t.square() / 2.0)
+        self.register_buffer("t", t)
+        self.register_buffer("phi", window)
+        self.register_buffer("weights", weights * window)
 
-    def forward(self, z):
-        n, d = z.shape
-        with torch.no_grad():
-            dist_sq = torch.sum((z.unsqueeze(1) - z.unsqueeze(0))**2, dim=-1)
-            median_sq = torch.median(dist_sq)
-            alpha = 1.0 / (median_sq + 1e-6)
-
-        # Score function: Laplace Prior | Score = -z / (sigma * ||z||)
-        norm = torch.norm(z, p=2, dim=-1, keepdim=True) + 1e-8
-        s = -z / (self.sigma * norm)
-        
-        # IMQ Kernel
-        K = (1 + alpha * dist_sq)**(-self.beta)
-        diff = z.unsqueeze(1) - z.unsqueeze(0)
-        grad_coeff = -2 * alpha * self.beta * (1 + alpha * dist_sq)**(-self.beta - 1)
-        grad_k = grad_coeff.unsqueeze(-1) * diff
-        
-        term_a = (s @ s.T) * K
-        term_b = torch.sum(s.unsqueeze(1) * (-grad_k), dim=-1)
-        term_c = torch.sum(grad_k * s.unsqueeze(0), dim=-1)
-        laplacian = grad_coeff * (d - 2 * alpha * (self.beta + 1) * dist_sq / (1 + alpha * dist_sq))
-
-        k_stein = term_a + term_b + term_c + laplacian
-        loss = (torch.sum(k_stein) - torch.trace(k_stein)) / (n * (n - 1))
-        return loss
+    def forward(self, proj):
+        # Optimized for H100 using higher precision quadrature
+        A = torch.randn(proj.size(-1), 256, device=proj.device)
+        A = A.div_(A.norm(p=2, dim=0))
+        x_t = (proj @ A).unsqueeze(-1) * self.t
+        err = (x_t.cos().mean(-3) - self.phi).square() + x_t.sin().mean(-3).square()
+        statistic = (err @ self.weights) * proj.size(-2)
+        return statistic.mean()
 
 # === MODEL CORE ===
-class KerJEPA_Kaggle(nn.Module):
+class LeJEPA_Kaggle(nn.Module):
     def __init__(self, proj_dim=128):
         super().__init__()
         self.backbone = timm.create_model('vit_small_patch8_224', pretrained=False, num_classes=512, drop_path_rate=0.1, img_size=128)
@@ -93,13 +84,13 @@ class MultiCropFolder(datasets.ImageFolder):
 
 # === MAIN LOGIC ===
 def main():
-    print("\n" + "🚀 KAG_B4: KERJEPA LAPLACE KSD | 50+50 EPOCHS | H100".center(60, "="))
+    print("\n" + "🚀 KAG_B1: LEJEPA BASELINE | 50+50 EPOCHS | H100".center(60, "="))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     # 1. SETTINGS
     ssl_epochs = 50
     lp_epochs = 50
-    batch_size = 32
+    batch_size = 32 # 8 views * 32 = 256 batch total
     lr_ssl = 5e-4
     lamb = 0.02
     
@@ -124,10 +115,10 @@ def main():
                               batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True)
 
     # 3. STAGE 1: PRE-TRAINING
-    model = KerJEPA_Kaggle().to(device)
-    loss_fn = KSDLoss_Laplace().to(device)
+    model = LeJEPA_Kaggle().to(device)
+    sigreg = SIGReg().to(device)
     
-    # H100 Compile
+    # H100 Compile (Extreme Speed)
     model = torch.compile(model)
     
     opt = torch.optim.AdamW(model.parameters(), lr=lr_ssl, weight_decay=0.05)
@@ -151,14 +142,14 @@ def main():
                 _, proj = model(views)
                 proj = proj.reshape(n, v, -1).transpose(0, 1) # [V, N, D]
                 inv_loss = (proj - proj.mean(0, keepdim=True)).square().mean()
-                reg_loss = loss_fn(proj.mean(0))
-                ssl_loss = reg_loss * lamb + inv_loss * (1 - lamb)
+                reg_loss = sigreg(proj)
+                loss = reg_loss * lamb + inv_loss * (1 - lamb)
             
-            opt.zero_grad(); scaler.scale(ssl_loss).backward(); scaler.step(opt); scaler.update()
+            opt.zero_grad(); scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
             scheduler.step()
-            pbar.set_postfix({"Loss": f"{ssl_loss.item():.4f}"})
+            pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
 
-    torch.save(model.state_dict(), f"{SAVE_DIR}/kag_kerjepa_laplace.pth")
+    torch.save(model.state_dict(), f"{SAVE_DIR}/kag_lejepa_baseline.pth")
     
     # 4. STAGE 2: FINAL LINEAR PROBE
     print("\n" + "🧪 STAGE 2: FINAL LINEAR PROBE (50 EPOCHS)".center(60, "-"))
@@ -171,6 +162,7 @@ def main():
     val_loader = DataLoader(datasets.ImageFolder(os.path.join(DATA_PATH, 'val'), eval_trans), 
                             batch_size=128, shuffle=False, num_workers=8)
     
+    # Use raw model to avoid compile wrapper during evaluation logic
     backbone = model._orig_mod.backbone if hasattr(model, '_orig_mod') else model.backbone
     for p in backbone.parameters(): p.requires_grad = False
     backbone.eval()
@@ -189,7 +181,8 @@ def main():
                 loss = F.cross_entropy(logits, y)
             lp_opt.zero_grad(); loss.backward(); lp_opt.step()
             
-        final_head.eval(); correct = 0; total = 0
+        final_head.eval()
+        correct = 0; total = 0
         with torch.no_grad():
             for x, y in val_loader:
                 x, y = x.to(device), y.to(device)
@@ -198,12 +191,12 @@ def main():
         best_acc = max(best_acc, acc)
         if (epoch+1) % 10 == 0 or epoch == 0: print(f"  LP Ep {epoch+1}/{lp_epochs} | Acc: {acc:.2f}% | Best: {best_acc:.2f}%")
 
-    report = {"method": "KerJEPA_Laplace_Comparison", "pretraining_epochs": ssl_epochs, "linear_probe_acc": best_acc}
-    with open("/kaggle/working/results_kerjepa_laplace.json", "w") as f:
+    report = {"method": "LeJEPA_Baseline", "pretraining_epochs": ssl_epochs, "linear_probe_acc": best_acc}
+    with open("/kaggle/working/results_lejepa_baseline.json", "w") as f:
         json.dump(report, f, indent=2)
 
     print("\n" + "═"*60)
-    print(f"🎯 FINAL LAPLACE REPORT: {best_acc:.2f}%")
+    print(f"🎯 FINAL LEJEPA REPORT: {best_acc:.2f}%")
     print("═"*60)
 
 if __name__ == "__main__":

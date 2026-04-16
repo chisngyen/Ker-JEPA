@@ -32,8 +32,14 @@ Ker-JEPA/
 │   │   ├── kag_kerjepa_analytic.py      # B7: Sliced KSD analytic
 │   │   │
 │   │   └── ── Phase 2: Innovation (exp_ scripts, aim >92.5%) ────────────────
-│   │       ├── exp01_byol_student_t.py  # E1: BYOL EMA + Student-t KSD [MAIN]
-│   │       └── exp02_vicreg_student_t.py# E2: VICReg + Student-t KSD
+│   │       ├── exp01_byol_student_t.py  # E1: BYOL EMA + KSD-ST [FAILED 47%]
+│   │       ├── exp02_vicreg_student_t.py# E2: VICReg + KSD-ST [74.11% ★ best]
+│   │       ├── exp03_byol_fixed.py      # E3: BYOL deepcopy fix [41% dead end]
+│   │       ├── exp04_simclr_student_t.py# E4: SimCLR + KSD-ST [71.67%]
+│   │       ├── exp05_vicreg_multicrop.py# E5: VICReg + multicrop + KSD-ST
+│   │       ├── exp06_dino_student_t.py  # E6: DINO + KSD-ST [collapsed 20%]
+│       ├── exp07_vicreg_150ep.py    # E7: VICReg + KSD-ST, 150 SSL ep [PENDING]
+│       └── exp08_vicreg_tuned_150ep.py # E8: VICReg tuned batch256+LR1e-3, 150ep
 │   │
 │   ├── legacy/                          # Old scripts (pre-Kaggle refactor)
 │   └── tracker.md                       # Experiment results tracker
@@ -82,9 +88,24 @@ Normalize([0.485,0.456,0.406], [0.229,0.224,0.225])
 
 ---
 
+## Experiment Insights (Running Log)
+
+From Phase 2 runs so far:
+
+| # | Insight | Source |
+|:--|:--------|:-------|
+| 1 | **`copy.deepcopy` mandatory for EMA init** — `load_state_dict(strict=False)` leaves target random → BYOL collapse (47%) | exp01 |
+| 2 | **Non-contrastive (BYOL, VICReg) underfit at 50 epochs** — gradient signal/step too sparse | exp01, exp02 |
+| 3 | **VICReg does not collapse** — LP ep1=69.5% proves features are reasonable, just undertrained | exp02 |
+| 4 | **At 50ep budget: contrastive > non-contrastive** — SimCLR sees O(N²) pairs/step; batch=256 → 510 negatives | theory + exp01/02 |
+
+---
+
 ## Known Bugs Fixed
 
-1. **`transforms.Solarize` does not exist on torchvision < 0.11** — use `PIL.ImageOps.solarize` via Lambda:
+1. **EMA target init with `load_state_dict(strict=False)`** — does NOT copy all weights correctly. Always use `copy.deepcopy(online_model)` for target init. Fixed in `exp03_byol_fixed.py`.
+
+2. **`transforms.Solarize` does not exist on torchvision < 0.11** — use `PIL.ImageOps.solarize` via Lambda:
    ```python
    transforms.Lambda(lambda img: __import__('PIL').ImageOps.solarize(img, 128))
    ```
@@ -127,40 +148,41 @@ Start with ν=3. This gives heavier tails than Gaussian → better representatio
 
 ## Innovation Experiment Architecture (exp_ scripts)
 
-### exp01 — BYOL + Student-t KSD
+### exp01 — BYOL + Student-t KSD [FAILED — target init bug, 47.21%]
+### exp02 — VICReg + Student-t KSD [74.11% — underfitting at 50ep]
+### exp03 — BYOL Fixed + Student-t KSD [FAILED — 41.04%]
+### exp04 — SimCLR + Student-t KSD [71.67%]
+### exp05 — VICReg + Multi-Crop + Student-t KSD [PENDING]
 
 ```
-Online: backbone → projector(512→2048→256) → predictor(256→512→256)
-Target: backbone (EMA) → projector(512→2048→256)   [no grad, no predictor]
-
-Loss = BYOL_cosine(pred1, target2.detach()) + BYOL_cosine(pred2, target1.detach())
-     + 0.05 * StudentT_KSD(cat[proj1, proj2])
-
-EMA momentum: cosine schedule 0.99 → 1.0 over total SSL steps
-Key: EMA update on raw_target (NOT compiled wrapper)
+Build on exp02 (best 74.11%): add 2 global + 4 local crops
+Global-global: full VICReg + KSD-ST
+Global-local: invariance only (9× more signal, same epoch count)
+λ_mc=0.5, λ_ksd=0.05
 ```
 
-### exp02 — VICReg + Student-t KSD
+### exp06 — DINO + Student-t KSD [PENDING — high priority]
 
 ```
-Model: backbone → expander(512→2048→2048→512)
-
-Loss = 25*inv + 25*var + 1*cov          ← standard VICReg
-     + 0.05 * StudentT_KSD(cat[z1, z2]) ← distribution shaping
-
-No EMA — variance/covariance terms prevent collapse directly.
+ViT-native self-distillation: teacher (EMA deepcopy) sharpens output τ_t=0.04,
+student learns τ_s=0.1. Multi-crop: student(all) vs teacher(global).
+Centering prevents trivial collapse. KSD-ST on backbone feats λ=0.03.
+Expected: highest accuracy of all Phase 2 experiments.
 ```
 
 ### Shared Protocol (exp_ scripts)
 
 | Param | Value |
 |-------|-------|
-| batch_size | 128 (vs kag_ 32) |
+| SSL epochs | 50 |
+| LP epochs | 50 |
+| batch_size | 128 (exp01-03) / 256 (exp04 SimCLR) |
 | Augmentation | Full paper pipeline (blur + solarize) |
 | LR warmup | 5 epochs linear |
 | LR decay | Cosine |
 | BF16 | Yes |
 | compile | max-autotune |
+| Data path | `/kaggle/input/datasets/aniladepu/imagenette/imagenette` |
 
 ---
 

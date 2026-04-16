@@ -25,3 +25,7 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 Thumbs.db
+
+# Experiments & Private Docs
+exps/
+CLAUDE.md

@@ -29,35 +29,41 @@ from tqdm import tqdm
 torch.set_float32_matmul_precision('high')
 
 # === CONFIG ===
-DATA_PATH = '/kaggle/input/imagenette/imagenette'
+DATA_PATH = '/kaggle/input/datasets/aniladepu/imagenette/imagenette'
 SAVE_DIR = '/kaggle/working/models'
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# === LOSS: RBF KERNEL KSD (Comparison) ===
-class KSDLoss_RBF(nn.Module):
-    def __init__(self, sigma=1.0):
+# === LOSS: STUDENT-T KSD (Your Innovation) ===
+class StudentT_KSDLoss(nn.Module):
+    def __init__(self, sigma=1.0, nu=3.0, beta=0.5):
         super().__init__()
         self.sigma = sigma
+        self.nu = nu # Degrees of freedom
+        self.beta = beta # IMQ parameter
 
     def forward(self, z):
         n, d = z.shape
         with torch.no_grad():
             dist_sq = torch.sum((z.unsqueeze(1) - z.unsqueeze(0))**2, dim=-1)
-            median_sq = torch.median(dist_sq)
-            alpha = 1.0 / (median_sq + 1e-6)
+            median_dist = torch.median(dist_sq)
+            alpha = 1.0 / (median_dist + 1e-6)
 
-        # Score function: Gaussian Prior
-        s = -z / (self.sigma ** 2)
-        
-        # RBF (Gaussian) Kernel: K = exp(-alpha * dist_sq)
-        K = torch.exp(-alpha * dist_sq)
-        diff = z.unsqueeze(1) - z.unsqueeze(0)
-        grad_k = -2 * alpha * K.unsqueeze(-1) * diff
-        
+        # 1. Student-t Score Function: - (nu + d) * z / (nu * sigma^2 + ||z||^2)
+        norm_sq = torch.sum(z**2, dim=-1, keepdim=True)
+        coeff_s = (self.nu + d) / (self.nu * (self.sigma**2) + norm_sq)
+        s = -coeff_s * z 
+
+        # 2. IMQ Kernel & Gradients
+        K = (1 + alpha * dist_sq)**(-self.beta)
+        diff = z.unsqueeze(1) - z.unsqueeze(0) 
+        grad_coeff = -2 * alpha * self.beta * (1 + alpha * dist_sq)**(-self.beta - 1)
+        grad_k = grad_coeff.unsqueeze(-1) * diff 
+
+        # 3. KSD Terms
         term_a = (s @ s.T) * K
         term_b = torch.sum(s.unsqueeze(1) * (-grad_k), dim=-1)
         term_c = torch.sum(grad_k * s.unsqueeze(0), dim=-1)
-        laplacian = 2 * alpha * K * (d - 2 * alpha * dist_sq)
+        laplacian = grad_coeff * (d - 2 * alpha * (self.beta + 1) * dist_sq / (1 + alpha * dist_sq))
 
         k_stein = term_a + term_b + term_c + laplacian
         loss = (torch.sum(k_stein) - torch.trace(k_stein)) / (n * (n - 1))
@@ -90,7 +96,7 @@ class MultiCropFolder(datasets.ImageFolder):
 
 # === MAIN LOGIC ===
 def main():
-    print("\n" + "🚀 KAG_B6: KERJEPA RBF KERNEL | 50+50 EPOCHS | H100".center(60, "="))
+    print("\n" + "🚀 KAG_B3: KERJEPA STUDENT-T INNOVATION | 50+50 EPOCHS | H100".center(60, "="))
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     # 1. SETTINGS
@@ -122,7 +128,7 @@ def main():
 
     # 3. STAGE 1: PRE-TRAINING
     model = KerJEPA_Kaggle().to(device)
-    loss_fn = KSDLoss_RBF().to(device)
+    loss_fn = StudentT_KSDLoss(nu=3.0).to(device)
     
     # H100 Compile
     model = torch.compile(model)
@@ -155,7 +161,7 @@ def main():
             scheduler.step()
             pbar.set_postfix({"Loss": f"{ssl_loss.item():.4f}"})
 
-    torch.save(model.state_dict(), f"{SAVE_DIR}/kag_kerjepa_rbf.pth")
+    torch.save(model.state_dict(), f"{SAVE_DIR}/kag_kerjepa_student_t.pth")
     
     # 4. STAGE 2: FINAL LINEAR PROBE
     print("\n" + "🧪 STAGE 2: FINAL LINEAR PROBE (50 EPOCHS)".center(60, "-"))
@@ -195,12 +201,12 @@ def main():
         best_acc = max(best_acc, acc)
         if (epoch+1) % 10 == 0 or epoch == 0: print(f"  LP Ep {epoch+1}/{lp_epochs} | Acc: {acc:.2f}% | Best: {best_acc:.2f}%")
 
-    report = {"method": "KerJEPA_RBF_Comparison", "pretraining_epochs": ssl_epochs, "linear_probe_acc": best_acc}
-    with open("/kaggle/working/results_kerjepa_rbf.json", "w") as f:
+    report = {"method": "KerJEPA_StudentT_Innovation", "pretraining_epochs": ssl_epochs, "linear_probe_acc": best_acc}
+    with open("/kaggle/working/results_kerjepa_student_t.json", "w") as f:
         json.dump(report, f, indent=2)
 
     print("\n" + "═"*60)
-    print(f"🎯 FINAL RBF REPORT: {best_acc:.2f}%")
+    print(f"🎯 FINAL STUDENT-T REPORT: {best_acc:.2f}%")
     print("═"*60)
 
 if __name__ == "__main__":
